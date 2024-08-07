@@ -1,0 +1,5 @@
+sysroot
+toolchain
+**.o
+.vscode
+weather
