@@ -1,5 +1,5 @@
 #交叉编译远程对端, 需要根据开发并IP地址修改
-PEER			:= root@172.17.0.83
+PEER			:= root@172.17.0.75
 
 CC				:= $(CROSS_COMPILE)gcc
 CXX				:= $(CROSS_COMPILE)g++
@@ -81,7 +81,7 @@ OBJS 			= $(AOBJS) $(COBJS) $(CXXOBJS) $(MAINOBJ)
 
 ## MAINOBJ -> OBJFILES
 
-.PHONY: all debug clean cross
+.PHONY: all debug clean cross cross-debug cross-run
 
 all: $(TARGET)
     
@@ -118,4 +118,6 @@ cross-debug:
 		DEBUG=true \
 		make -j16
 	@scp -O $(TARGET) $(PEER):/usr/bin/$(TARGET)
+
+cross-run:
 	@ssh $(PEER) "nohup gdbserver 0.0.0.0:2000 /usr/bin/$(TARGET) >/dev/null 2>&1 &"

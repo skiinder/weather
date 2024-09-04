@@ -10,14 +10,6 @@
 #include <pthread.h>
 #include <jpeglib.h>
 
-// 全局变量定义
-lv_obj_t *label_time;
-lv_obj_t *label_date;
-lv_obj_t *label_weather;
-lv_obj_t *label_temprature;
-lv_obj_t *label_wind;
-lv_obj_t *label_humidity;
-
 typedef struct WeatherDataStruct
 {
     char temperature[10];
@@ -25,18 +17,10 @@ typedef struct WeatherDataStruct
     char wind_direction[20];
     char wind_power[10];
     char humidity[10];
+    pthread_mutex_t data_lock;
 } WeatherData;
 
-static WeatherData data = {
-    .humidity = "--",
-    .temperature = "--",
-    .weather = "----",
-    .wind_direction = "----",
-    .wind_power = "---"};
-pthread_mutex_t data_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_t weather_thread = 0;
-
-static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
+static size_t panel_writeMemchunkCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t realsize = size * nmemb;
     Memchunk *chunk = (Memchunk *)userp;
@@ -57,8 +41,9 @@ static int panel_request(char *url, Memchunk *chunk)
         return -1;
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, panel_writeMemchunkCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, chunk);
+
 
     res = curl_easy_perform(curl);
     if (res != CURLE_OK)
@@ -74,6 +59,7 @@ static int panel_request(char *url, Memchunk *chunk)
         LV_LOG_WARN("Curl response code %ld\n", response_code);
         return -1;
     }
+    LV_LOG_INFO("Curl result: %s\n", chunk->ptr);
     return 0;
 }
 
@@ -116,34 +102,73 @@ static int panel_parseWeatherData(char *json_str, WeatherData *weather_data)
         return -1;
     }
 
-    pthread_mutex_lock(&data_lock);
+    pthread_mutex_lock(&weather_data->data_lock);
     strcpy(weather_data->temperature, temperature->valuestring);
     strcpy(weather_data->weather, weather->valuestring);
     strcpy(weather_data->wind_direction, winddirection->valuestring);
     strcpy(weather_data->wind_power, windpower->valuestring);
     strcpy(weather_data->humidity, humidity->valuestring);
-    pthread_mutex_unlock(&data_lock);
+    pthread_mutex_unlock(&weather_data->data_lock);
 
     cJSON_Delete(json);
 
     return 0;
 }
 
+static int panel_parseCityCode(char *json_str, char *city_code)
+{
+    cJSON *json = cJSON_Parse(json_str);
+
+    if (json == NULL)
+    {
+        LV_LOG_ERROR("Error parsing JSON\n");
+        return -1;
+    }
+
+    cJSON *adcode = cJSON_GetObjectItem(json, "adcode");
+    if (adcode == NULL || !cJSON_IsString(adcode))
+    {
+        LV_LOG_ERROR("Error getting adcode array from JSON\n");
+        cJSON_Delete(json);
+        return -1;
+    }
+
+    LV_ASSERT(strlen(adcode->valuestring) == 6);
+    strcpy(city_code, adcode->valuestring);
+
+    cJSON_Delete(json);
+    return 0;
+}
+
 static void *panel_getWeather(void *ptr)
 {
     Memchunk chunk;
+    char city_code[7];
+    char weather_url[256];
+    memset(&chunk, 0, sizeof(Memchunk));
     if (memchunk_init(&chunk) < 0)
     {
         return (void *)-1;
     }
 
-    if (panel_request("http://restapi.amap.com/v3/weather/weatherInfo?key=543b7b6c08e25803d4adf379f2b68d50&city=110000&extensions=base",
-                      &chunk) < 0)
+    if (panel_request("http://restapi.amap.com/v3/ip?key=543b7b6c08e25803d4adf379f2b68d50", &chunk) < 0)
     {
         goto FAIL_EXIT;
     }
 
-    LV_LOG_INFO("Curl result: %s\n", chunk.ptr);
+    if (panel_parseCityCode(chunk.ptr, city_code) < 0)
+    {
+        goto FAIL_EXIT;
+    }
+
+    snprintf(weather_url, sizeof(weather_url), "http://restapi.amap.com/v3/weather/weatherInfo?key=543b7b6c08e25803d4adf379f2b68d50&city=%s&extensions=base", city_code);
+
+    memchunk_init(&chunk);
+
+    if (panel_request(weather_url, &chunk) < 0)
+    {
+        goto FAIL_EXIT;
+    }
 
     WeatherData *weather_data = ptr;
 
@@ -160,8 +185,10 @@ FAIL_EXIT:
     return (void *)-1;
 }
 
-static void update_data(lv_timer_t *lv_timer)
+static void panel_updateData(lv_timer_t *lv_timer)
 {
+    lv_obj_t *panel = lv_timer->user_data;
+    WeatherData *weather_data = panel->user_data;
     time_t now = time(NULL);
     struct tm *timeinfo = localtime(&now);
 
@@ -177,29 +204,31 @@ static void update_data(lv_timer_t *lv_timer)
     char wind_buffer[128];
     strftime(date_buffer, sizeof(date_buffer), "%Y-%m-%d", timeinfo);
     strftime(time_buffer, sizeof(time_buffer), "%H:%M:%S", timeinfo);
-    lv_label_set_text(label_date, date_buffer);
-    lv_label_set_text(label_time, time_buffer);
+    lv_label_set_text(lv_obj_get_child(panel, 0), time_buffer);
+    lv_label_set_text(lv_obj_get_child(panel, 1), date_buffer);
 
-    pthread_mutex_lock(&data_lock);
-    snprintf(temprature_buffer, sizeof(temprature_buffer), "温度: %s°C", data.temperature);
-    snprintf(wind_buffer, sizeof(wind_buffer), "风向: %s, 风力: %s", data.wind_direction, data.wind_power);
-    snprintf(humidity_buffer, sizeof(humidity_buffer), "湿度: %s", data.humidity);
-    lv_label_set_text(label_weather, data.weather);
-    pthread_mutex_unlock(&data_lock);
-    lv_label_set_text(label_temprature, temprature_buffer);
-    lv_label_set_text(label_wind, wind_buffer);
-    lv_label_set_text(label_humidity, humidity_buffer);
+    pthread_mutex_lock(&weather_data->data_lock);
+    snprintf(temprature_buffer, sizeof(temprature_buffer), "温度: %s°C", weather_data->temperature);
+    snprintf(wind_buffer, sizeof(wind_buffer), "风向: %s, 风力: %s", weather_data->wind_direction, weather_data->wind_power);
+    snprintf(humidity_buffer, sizeof(humidity_buffer), "湿度: %s", weather_data->humidity);
+    lv_label_set_text(lv_obj_get_child(panel, 2), weather_data->weather);
+    pthread_mutex_unlock(&weather_data->data_lock);
+    lv_label_set_text(lv_obj_get_child(panel, 3), temprature_buffer);
+    lv_label_set_text(lv_obj_get_child(panel, 4), wind_buffer);
+    lv_label_set_text(lv_obj_get_child(panel, 5), humidity_buffer);
 }
 
-static void update_weather(lv_timer_t *lv_timer)
+static void panel_updateWeather(lv_timer_t *lv_timer)
 {
-    if (pthread_create(&weather_thread, NULL, panel_getWeather, &data) > 0)
+    pthread_t thread = 0;
+    lv_obj_t *panel = lv_timer->user_data;
+    if (pthread_create(&thread, NULL, panel_getWeather, panel->user_data) > 0)
     {
-        pthread_detach(weather_thread);
+        pthread_detach(thread);
     }
 }
 
-void panel_create(void)
+lv_obj_t *panel_create(void)
 {
     // 声明外部字体
     LV_FONT_DECLARE(lv_font_chinese_18);
@@ -207,43 +236,61 @@ void panel_create(void)
     LV_IMG_DECLARE(background);
 
     // Create a new screen
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *parent_obj = lv_obj_create(lv_scr_act());
+    lv_obj_set_width(parent_obj, LV_HOR_RES);
+    lv_obj_set_height(parent_obj, LV_VER_RES);
+    WeatherData *temp = lv_mem_alloc(sizeof(WeatherData));
+    if (!temp)
+    {
+        LV_LOG_ERROR("Failed to allocate memory for WeatherData\n");
+        exit(EXIT_FAILURE);
+    }
 
-    lv_obj_set_style_bg_img_src(scr, &background, 0);
+    strcpy(temp->temperature, "--");
+    strcpy(temp->humidity, "--");
+    strcpy(temp->weather, "----");
+    strcpy(temp->wind_direction, "----");
+    strcpy(temp->wind_power, "----");
+    pthread_mutex_init(&temp->data_lock, NULL);
+
+    parent_obj->user_data = temp;
+
+    lv_obj_set_style_bg_img_src(parent_obj, &background, 0);
 
     // Time display
-    label_time = lv_label_create(scr);
+    lv_obj_t *label_time = lv_label_create(parent_obj);
     lv_obj_set_style_text_font(label_time, &lv_font_montserrat_48, 0);
     lv_obj_align(label_time, LV_ALIGN_CENTER, 0, -70);
 
     // Date display
-    label_date = lv_label_create(scr);
+    lv_obj_t *label_date = lv_label_create(parent_obj);
     lv_obj_set_style_text_font(label_date, &lv_font_chinese_18, 0);
     lv_obj_align(label_date, LV_ALIGN_CENTER, 0, -40);
 
     // Weather description
-    label_weather = lv_label_create(scr);
+    lv_obj_t *label_weather = lv_label_create(parent_obj);
     lv_obj_set_style_text_font(label_weather, &lv_font_chinese_18, 0);
     lv_obj_align(label_weather, LV_ALIGN_CENTER, 60, 0);
 
     // Current temperature
-    label_temprature = lv_label_create(scr);
+    lv_obj_t *label_temprature = lv_label_create(parent_obj);
     lv_obj_set_style_text_font(label_temprature, &lv_font_chinese_18, 0);
     lv_obj_align(label_temprature, LV_ALIGN_CENTER, 60, 20);
 
     // Wind level
-    label_wind = lv_label_create(scr);
+    lv_obj_t *label_wind = lv_label_create(parent_obj);
     lv_obj_set_style_text_font(label_wind, &lv_font_chinese_18, 0);
     lv_obj_align(label_wind, LV_ALIGN_CENTER, 60, 40);
 
     // Humidity
-    label_humidity = lv_label_create(scr);
+    lv_obj_t *label_humidity = lv_label_create(parent_obj);
     lv_obj_set_style_text_font(label_humidity, &lv_font_chinese_18, 0);
     lv_obj_align(label_humidity, LV_ALIGN_CENTER, 60, 60);
 
-    update_data(NULL);
-    update_weather(NULL);
+    lv_timer_t *timer1 = lv_timer_create(panel_updateData, 1000, parent_obj);
+    lv_timer_t *timer2 = lv_timer_create(panel_updateWeather, 60 * 1000, parent_obj);
 
-    lv_timer_create(update_data, 1000, NULL);
-    lv_timer_create(update_weather, 60 * 1000, NULL);
+    panel_updateData(timer1);
+    panel_updateWeather(timer2);
+    return parent_obj;
 }

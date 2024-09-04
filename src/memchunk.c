@@ -3,12 +3,17 @@
 
 int memchunk_init(Memchunk *chunk)
 {
+    if (chunk->ptr)
+    {
+        lv_mem_free(chunk->ptr);
+    }
     chunk->ptr = lv_mem_alloc(1);
     if (chunk->ptr == NULL)
     {
         LV_LOG_ERROR("Failed to allocate memory for chunk %p\n", chunk);
         return -1;
     }
+    chunk->ptr[0] = 0;
     chunk->size = 0;
     return 0;
 }
